@@ -17,6 +17,7 @@ import stat
 from git import Repo
 from git import NULL_TREE
 from truffleHogRegexes.regexChecks import regexes
+import csv
 
 
 
@@ -262,8 +263,20 @@ def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, comm
             regex_matches.append(foundRegex)
     return regex_matches
 
-def diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow):
+def diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path):
     issues = []
+    result_file_path = project_path + "/scan_results.csv"
+    mode = 'a' 
+    if os.path.exists(result_file_path) is False:
+        header = ["date","path","branch",'commitMessage',"secretKey","commitHash"]
+        file = open(result_file_path, 'w')
+        writer = csv.writer(file)
+        writer.writerow(header)
+        file.close()
+    mode = 'a'
+    file = open(result_file_path, mode)
+    writer = csv.writer(file)
+
     for blob in diff:
         printableDiff = blob.diff.decode('utf-8', errors='replace')
         if printableDiff.startswith("Binary files"):
@@ -283,8 +296,10 @@ def diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_
             foundIssues += found_regexes
         if not surpress_output:
             for foundIssue in foundIssues:
-                print_results(printJson, foundIssue)
+                row = [foundIssue['date'],foundIssue['path'],foundIssue['branch'],foundIssue['commit'],foundIssue['stringsFound'],foundIssue['reason'],foundIssue['commitHash']]
+                writer.writerow(row)
         issues += foundIssues
+    file.close()
     return issues
 
 def handle_results(output, output_dir, foundIssues):
@@ -343,30 +358,29 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
         branch_name = remote_branch.name
         prev_commit = None
         for curr_commit in repo.iter_commits(branch_name, max_count=max_depth):
-            author = repo.git.show("-s", "--format=Author: %an <%ae>", curr_commit.hexsha)
-            if author.count(login_user_name) <= 0:
-                continue
             commitHash = curr_commit.hexsha
-            if commitHash == since_commit:
-                since_commit_reached = True
-                break
-            # if not prev_commit, then curr_commit is the newest commit. And we have nothing to diff with.
-            # But we will diff the first commit with NULL_TREE here to check the oldest code.
-            # In this way, no commit will be missed.
-            diff_hash = hashlib.md5((str(prev_commit) + str(curr_commit)).encode('utf-8')).digest()
-            if not prev_commit:
+            author = repo.git.show("-s", "--format=%an <%ae>", commitHash)
+            if login_user_name in author:
+                if commitHash == since_commit:
+                    since_commit_reached = True
+                    break
+                # if not prev_commit, then curr_commit is the newest commit. And we have nothing to diff with.
+                # But we will diff the first commit with NULL_TREE here to check the oldest code.
+                # In this way, no commit will be missed.
+                diff_hash = hashlib.md5((str(prev_commit) + str(curr_commit)).encode('utf-8')).digest()
+                if not prev_commit:
+                    prev_commit = curr_commit
+                    continue
+                elif diff_hash in already_searched:
+                    prev_commit = curr_commit
+                    continue
+                else:
+                    diff = prev_commit.diff(curr_commit, create_patch=True)
+                # avoid searching the same diffs
+                already_searched.add(diff_hash)
+                foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path)
+                output = handle_results(output, output_dir, foundIssues)
                 prev_commit = curr_commit
-                continue
-            elif diff_hash in already_searched:
-                prev_commit = curr_commit
-                continue
-            else:
-                diff = prev_commit.diff(curr_commit, create_patch=True)
-            # avoid searching the same diffs
-            already_searched.add(diff_hash)
-            # foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow)
-            # output = handle_results(output, output_dir, foundIssues)
-            prev_commit = curr_commit
 
         # Check if since_commit was used to check which diff should be grabbed
         if since_commit_reached:
@@ -377,30 +391,43 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
         else:
             diff = curr_commit.diff(NULL_TREE, create_patch=True)
 
-        foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow)
+        foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path)
         output = handle_results(output, output_dir, foundIssues)
     output["project_path"] = project_path
     output["clone_uri"] = git_url
     output["issues_path"] = output_dir
+    save_current_user_commit(login_user_name,prev_commit)
     if not repo_path:
         repo.close()
         shutil.rmtree(project_path, onerror=del_rw)
     return output
 
 def save_current_user_commit(current_user,commit_hash):
-    path = '/var/jenkins_home/workspace/user_data'
+    if commit_hash is None:
+        return
+    path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
     if not os.path.isdir(path):
         os.makedirs(path)
     json_file = path + "/history.json"
-    file = open(json_file)
-    data = json.load(file)
-    data[current_user] = commit_hash
+    json_data = {}
+    if not os.path.exists(json_file):
+        json_data[current_user] = commit_hash.hexsha
+    else:
+        file = open(json_file)
+        json_data = json.load(file)
+        print(json_data)
+    json_data[current_user] = commit_hash.hexsha
+    print(json_data)
+    with open(json_file, 'w') as outfile:
+        json.dump(json_data,outfile)
 
 def get_current_user_commit(current_user):
-    path = '/var/jenkins_home/workspace/user_data'
+    path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
     if not os.path.isdir(path):
         return None
     json_file = path + "/history.json"
+    if not os.path.exists(json_file):
+        return None
     file = open(json_file)
     data = json.load(file)
     return data[current_user]
