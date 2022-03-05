@@ -347,7 +347,8 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
     already_searched = set()
     output_dir = tempfile.mkdtemp()
 
-    since_commit = get_current_user_commit(login_user_name)
+    repo_name = os.path.basename(project_path)
+    since_commit = get_current_user_commit(login_user_name,repo_name)
     if branch:
         branches = repo.remotes.origin.fetch(branch)
     else:
@@ -396,13 +397,13 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
     output["project_path"] = project_path
     output["clone_uri"] = git_url
     output["issues_path"] = output_dir
-    save_current_user_commit(login_user_name,prev_commit)
+    save_current_user_commit(login_user_name,prev_commit,repo_name)
     if not repo_path:
         repo.close()
         shutil.rmtree(project_path, onerror=del_rw)
     return output
 
-def save_current_user_commit(current_user,commit_hash):
+def save_current_user_commit(current_user,commit_hash,repo_name):
     if commit_hash is None:
         return
     path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
@@ -411,17 +412,21 @@ def save_current_user_commit(current_user,commit_hash):
     json_file = path + "/history.json"
     json_data = {}
     if not os.path.exists(json_file):
-        json_data[current_user] = commit_hash.hexsha
+        json_data[repo_name] = {}
+        json_data[repo_name][current_user] = commit_hash.hexsha
     else:
         file = open(json_file)
         json_data = json.load(file)
-        print(json_data)
-    json_data[current_user] = commit_hash.hexsha
-    print(json_data)
+        if repo_name in json_data:
+            json_data[repo_name][current_user] = commit_hash.hexsha
+        else:
+            json_data[repo_name] = {}
+            json_data[repo_name][current_user] = commit_hash.hexsha
+
     with open(json_file, 'w') as outfile:
         json.dump(json_data,outfile)
 
-def get_current_user_commit(current_user):
+def get_current_user_commit(current_user,repo_name):
     path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
     if not os.path.isdir(path):
         return None
@@ -430,7 +435,10 @@ def get_current_user_commit(current_user):
         return None
     file = open(json_file)
     data = json.load(file)
-    return data[current_user]
+    if repo_name in data:
+         return data[repo_name][current_user]
+    else:
+        return None
 
 def clean_up(output):
     issues_path = output.get("issues_path", None)
