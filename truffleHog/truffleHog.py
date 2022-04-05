@@ -90,9 +90,12 @@ def main():
         for pattern in set(l[:-1].lstrip() for l in args.exclude_paths):
             if pattern and not pattern.startswith('#'):
                 path_exclusions.append(re.compile(pattern))
-
+    users_mapping = findMapping()
+    user_id = users_mapping[args.login_user_name]
+    user_id = args.login_user_name if user_id is None else user_id
+    print(user_id)
     output = find_strings(args.git_url, args.since_commit, args.max_depth, args.output_json, args.do_regex, do_entropy,
-            surpress_output=False, custom_regexes=regexes, branch=args.branch, repo_path=args.repo_path, path_inclusions=path_inclusions, path_exclusions=path_exclusions, allow=allow,login_user_name=args.login_user_name)
+            surpress_output=False, custom_regexes=regexes, branch=args.branch, repo_path=args.repo_path, path_inclusions=path_inclusions, path_exclusions=path_exclusions, allow=allow,login_user_name=user_id)
     project_path = output["project_path"]
     if args.cleanup:
         clean_up(output)
@@ -245,6 +248,8 @@ def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, comm
     else:
         secret_regexes = regexes
     regex_matches = []
+    print("regex")
+    print(secret_regexes)
     for key in secret_regexes:
         found_strings = secret_regexes[key].findall(printableDiff)
         for found_string in found_strings:
@@ -262,13 +267,14 @@ def regex_check(printableDiff, commit_time, branch_name, prev_commit, blob, comm
             foundRegex['commitHash'] = prev_commit.hexsha
             regex_matches.append(foundRegex)
     return regex_matches
-
+def detect_secret_check()
+    
 def diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path):
     issues = []
     result_file_path = project_path + "/scan_results.csv"
     mode = 'a' 
     if os.path.exists(result_file_path) is False:
-        header = ["date","path","branch",'commitMessage',"secretKey","commitHash"]
+        header = ["date","path","branch",'commitMessage',"secretKey","reason","commitHash"]
         file = open(result_file_path, 'w')
         writer = csv.writer(file)
         writer.writerow(header)
@@ -285,7 +291,7 @@ def diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_
             continue
         for key in allow:
             printableDiff = allow[key].sub('', printableDiff)
-        commit_time =  datetime.datetime.fromtimestamp(prev_commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
+        commit_time =  '' if prev_commit is None else datetime.datetime.fromtimestamp(prev_commit.committed_date).strftime('%Y-%m-%d %H:%M:%S')
         foundIssues = []
         if do_entropy:
             entropicDiff = find_entropy(printableDiff, commit_time, branch_name, prev_commit, blob, commitHash)
@@ -347,8 +353,18 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
     already_searched = set()
     output_dir = tempfile.mkdtemp()
 
+    os.environ['GIT_ASKPASS'] = os.path.join("/var/lib/jenkins/workspace/secret-config", 'askpass.py')
+    os.environ['GIT_USERNAME'] = 'KMadhusudhan'
+    os.environ['GIT_PASSWORD'] = 'pwd'
+    
+    result_file_path = repo_path + "/scan_results.csv"
+    if os.path.exists(result_file_path):
+        os.remove(result_file_path) 
+
     repo_name = os.path.basename(project_path)
-    since_commit = get_current_user_commit(login_user_name,repo_name)
+    since_commit = get_current_user_commit(login_user_name,repo_name,branch)
+    print("since_commit")
+    print(since_commit)
     if branch:
         branches = repo.remotes.origin.fetch(branch)
     else:
@@ -358,11 +374,13 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
         since_commit_reached = False
         branch_name = remote_branch.name
         prev_commit = None
+        commit = repo.head.commit
         for curr_commit in repo.iter_commits(branch_name, max_count=max_depth):
             commitHash = curr_commit.hexsha
             author = repo.git.show("-s", "--format=%an <%ae>", commitHash)
-            if login_user_name in author:
-                if commitHash == since_commit:
+            print(curr_commit.author.email)
+            if login_user_name == curr_commit.author.email :
+                if since_commit_reached == False and (commitHash == since_commit):
                     since_commit_reached = True
                     break
                 # if not prev_commit, then curr_commit is the newest commit. And we have nothing to diff with.
@@ -379,11 +397,13 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
                     diff = prev_commit.diff(curr_commit, create_patch=True)
                 # avoid searching the same diffs
                 already_searched.add(diff_hash)
-                foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path)
-                output = handle_results(output, output_dir, foundIssues)
+                if since_commit_reached:
+                    foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path)
+                    output = handle_results(output, output_dir, foundIssues)
                 prev_commit = curr_commit
 
         # Check if since_commit was used to check which diff should be grabbed
+
         if since_commit_reached:
             # Handle when there's no prev_commit (used since_commit on the most recent commit)
             if prev_commit is None:
@@ -391,43 +411,48 @@ def find_strings(git_url, since_commit=None, max_depth=1000000, printJson=False,
             diff = prev_commit.diff(curr_commit, create_patch=True)
         else:
             diff = curr_commit.diff(NULL_TREE, create_patch=True)
-
+        diff = curr_commit.diff(repo.head.commit,create_patch=True)
         foundIssues = diff_worker(diff, curr_commit, prev_commit, branch_name, commitHash, custom_regexes, do_entropy, do_regex, printJson, surpress_output, path_inclusions, path_exclusions, allow,project_path)
         output = handle_results(output, output_dir, foundIssues)
     output["project_path"] = project_path
     output["clone_uri"] = git_url
     output["issues_path"] = output_dir
-    save_current_user_commit(login_user_name,prev_commit,repo_name)
+    save_current_user_commit(login_user_name,repo.head.commit,repo_name,branch)
     if not repo_path:
         repo.close()
         shutil.rmtree(project_path, onerror=del_rw)
     return output
 
-def save_current_user_commit(current_user,commit_hash,repo_name):
+def save_current_user_commit(current_user,commit_hash,repo_name,branch):
     if commit_hash is None:
         return
-    path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
+    path = '/var/lib/jenkins/workspace/user_data'
     if not os.path.isdir(path):
         os.makedirs(path)
     json_file = path + "/history.json"
     json_data = {}
     if not os.path.exists(json_file):
         json_data[repo_name] = {}
-        json_data[repo_name][current_user] = commit_hash.hexsha
+        json_data[repo_name][branch] = {}
+        json_data[repo_name][branch][current_user] = commit_hash.hexsha
     else:
         file = open(json_file)
         json_data = json.load(file)
         if repo_name in json_data:
-            json_data[repo_name][current_user] = commit_hash.hexsha
+            if branch in json_data[repo_name]:
+                json_data[repo_name][branch][current_user] = commit_hash.hexsha
+            else:
+                json_data[repo_name][branch] = {}
+                json_data[repo_name][branch][current_user] = {}
         else:
             json_data[repo_name] = {}
-            json_data[repo_name][current_user] = commit_hash.hexsha
-
+            json_data[repo_name][branch] = {}
+            json_data[repo_name][branch][current_user] = commit_hash.hexsha
     with open(json_file, 'w') as outfile:
         json.dump(json_data,outfile)
 
-def get_current_user_commit(current_user,repo_name):
-    path = '/Users/madhushudhan.konda/MyApplications/truffleHog/user_data'
+def get_current_user_commit(current_user,repo_name,branch):
+    path = '/var/lib/jenkins/workspace/user_data'
     if not os.path.isdir(path):
         return None
     json_file = path + "/history.json"
@@ -436,14 +461,22 @@ def get_current_user_commit(current_user,repo_name):
     file = open(json_file)
     data = json.load(file)
     if repo_name in data:
-         return data[repo_name][current_user]
+         if branch in data[repo_name]:
+             if current_user in data[repo_name][branch]:
+                return data[repo_name][branch][current_user]
+             else:
+                return None
+         return None
     else:
         return None
-
+ 
 def clean_up(output):
     issues_path = output.get("issues_path", None)
     if issues_path and os.path.isdir(issues_path):
         shutil.rmtree(output["issues_path"])
-
+def findMapping():
+    with open('/var/lib/jenkins/workspace/user_data/users_mapping.json') as json_file:
+        data = json.load(json_file)
+        return data
 if __name__ == "__main__":
     main()
